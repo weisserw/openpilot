@@ -1,3 +1,4 @@
+from typing import Tuple
 from cereal import car
 from openpilot.common.conversions import Conversions as CV
 from openpilot.common.numpy_fast import interp, clip
@@ -46,8 +47,10 @@ class CarController(CarControllerBase):
     self.packer_ch = CANPacker(DBC[self.CP.carFingerprint]['chassis'])
 
   @staticmethod
-  def calc_pedal_command(accel: float, long_active: bool) -> float:
-    if not long_active: return 0.
+  def calc_pedal_command(accel: float, long_active: bool) -> Tuple[float, bool]:
+    if not long_active: return 0., False
+
+    press_regen_paddle = False
 
     zero = 0.15625  # 40/256
     if accel > 0.:
@@ -56,9 +59,9 @@ class CarController(CarControllerBase):
     else:
       # if accel is negative, -0.1 -> 0.015625
       pedal_gas = clip(zero + accel, 0., zero)  # Make brake the same size as gas, but clip to regen
+      press_regen_paddle = True
 
-    return pedal_gas
-
+    return pedal_gas, press_regen_paddle
 
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
@@ -111,6 +114,7 @@ class CarController(CarControllerBase):
         at_full_stop = CC.longActive and CS.out.standstill
         near_stop = CC.longActive and (CS.out.vEgo < self.params.NEAR_STOP_BRAKE_PHASE)
         interceptor_gas_cmd = 0
+        press_regen_paddle = False
         if not CC.longActive:
           # ASCM sends max regen when not enabled
           self.apply_gas = self.params.INACTIVE_REGEN
@@ -118,6 +122,7 @@ class CarController(CarControllerBase):
         elif near_stop and stopping and not CC.cruiseControl.resume:
           self.apply_gas = self.params.INACTIVE_REGEN
           self.apply_brake = int(min(-100 * self.CP.stopAccel, self.params.MAX_BRAKE))
+          press_regen_paddle = True
         else:
           # Normal operation
           if self.CP.carFingerprint in EV_CAR:
@@ -133,12 +138,14 @@ class CarController(CarControllerBase):
             self.apply_gas = self.params.INACTIVE_REGEN
           if self.CP.carFingerprint in CC_ONLY_CAR:
             # gas interceptor only used for full long control on cars without ACC
-            interceptor_gas_cmd = self.calc_pedal_command(actuators.accel, CC.longActive)
+            interceptor_gas_cmd, press_regen_paddle = self.calc_pedal_command(actuators.accel, CC.longActive)
 
+        # XXX don't need to do this in CC_ONLY_CAR?
         if self.CP.enableGasInterceptor and self.apply_gas > self.params.INACTIVE_REGEN and CS.out.cruiseState.standstill:
           # "Tap" the accelerator pedal to re-engage ACC
           interceptor_gas_cmd = self.params.SNG_INTERCEPTOR_GAS
           self.apply_brake = 0
+          press_regen_paddle = False
           self.apply_gas = self.params.INACTIVE_REGEN
 
         idx = (self.frame // 4) % 4
@@ -149,6 +156,8 @@ class CarController(CarControllerBase):
             can_sends.extend(gmcan.create_gm_cc_spam_command(self.packer_pt, self, CS, actuators))
         if self.CP.enableGasInterceptor:
           can_sends.append(create_gas_interceptor_command(self.packer_pt, interceptor_gas_cmd, idx))
+          if press_regen_paddle:
+              can_sends.append(gmcan.create_regen_paddle_command(self.packer_pt, CanBus.POWERTRAIN))
         if self.CP.carFingerprint not in CC_ONLY_CAR:
           friction_brake_bus = CanBus.CHASSIS
           # GM Camera exceptions
