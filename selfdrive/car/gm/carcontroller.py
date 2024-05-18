@@ -115,7 +115,6 @@ class CarController(CarControllerBase):
         near_stop = CC.longActive and (CS.out.vEgo < self.params.NEAR_STOP_BRAKE_PHASE)
         interceptor_gas_cmd = 0
         press_regen_paddle = False
-        cc_only = self.CP.carFingerprint in CC_ONLY_CAR
         if not CC.longActive:
           # ASCM sends max regen when not enabled
           self.apply_gas = self.params.INACTIVE_REGEN
@@ -137,11 +136,12 @@ class CarController(CarControllerBase):
           # FIXME: brakes aren't applied immediately when enabling at a stop
           if stopping:
             self.apply_gas = self.params.INACTIVE_REGEN
-          if cc_only:
+          if self.CP.carFingerprint in CC_ONLY_CAR:
             # gas interceptor only used for full long control on cars without ACC
             interceptor_gas_cmd, press_regen_paddle = self.calc_pedal_command(actuators.accel, CC.longActive)
 
-        if self.CP.enableGasInterceptor and self.apply_gas > self.params.INACTIVE_REGEN and CS.out.cruiseState.standstill and not cc_only:
+        # XXX don't need to do this in CC_ONLY_CAR?
+        if self.CP.enableGasInterceptor and self.apply_gas > self.params.INACTIVE_REGEN and CS.out.cruiseState.standstill:
           # "Tap" the accelerator pedal to re-engage ACC
           interceptor_gas_cmd = self.params.SNG_INTERCEPTOR_GAS
           self.apply_brake = 0
@@ -158,11 +158,11 @@ class CarController(CarControllerBase):
           can_sends.append(create_gas_interceptor_command(self.packer_pt, interceptor_gas_cmd, idx))
           if press_regen_paddle:
               can_sends.append(gmcan.create_regen_paddle_command(self.packer_pt, CanBus.POWERTRAIN))
-        if not cc_only:
+        if self.CP.carFingerprint not in CC_ONLY_CAR:
           friction_brake_bus = CanBus.CHASSIS
           # GM Camera exceptions
           # TODO: can we always check the longControlState?
-          if self.CP.networkLocation == NetworkLocation.fwdCamera:
+          if self.CP.networkLocation == NetworkLocation.fwdCamera and self.CP.carFingerprint not in CC_ONLY_CAR:
             at_full_stop = at_full_stop and stopping
             friction_brake_bus = CanBus.POWERTRAIN
 
